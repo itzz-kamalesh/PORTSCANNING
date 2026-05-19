@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Browser-Based Port Scanner</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for dark, modern theme */
+        body {
+            background-color: #0d1a26;
+            color: #e0e0e0;
+            font-family: 'Inter', sans-serif;
+        }
+        .container {
+            max-width: 800px;
+        }
+        #results-table th {
+            background-color: #007bff;
+        }
+        .open {
+            color: #2ECC71; /* Green */
+        }
+        .closed {
+            color: #e74c3c; /* Red */
+        }
+        .advice-status {
+            background-color: #3498db; /* Blue for local analysis */
+            color: white;
+            padding: 4px 8px;
+            font-size: 0.75rem;
+            border-radius: 4px;
+            display: inline-block;
+        }
+        .advice-text {
+            padding: 10px;
+            margin-top: 5px;
+            background-color: #2c3e50;
+            border-left: 4px solid #3498db; /* Blue for local advice */
+            white-space: pre-wrap;
+            font-size: 0.9rem;
+            text-align: left; /* Align text within the advice box */
+        }
+        .risk-high { color: #e74c3c; font-weight: bold; }
+        .risk-medium { color: #f39c12; }
+        .risk-low { color: #2ECC71; }
+    </style>
+</head>
+<body class="p-4 md:p-8 flex justify-center items-start min-h-screen">
+    <div class="container w-full bg-gray-800 p-6 md:p-10 rounded-xl shadow-2xl border-t-4 border-blue-500">
+        <h1 class="text-3xl font-extrabold text-center text-blue-400 mb-6">
+            <span class="mr-2">🛡️</span> Browser-Based Port Scanner
+        </h1>
+        <p class="text-center text-sm text-gray-400 mb-8">
+            Performs simulated port checks using browser resource loading. Risk analysis is performed locally using built-in security rules.
+        </p>
+
+        <!-- Input Form -->
+        <form id="scanForm" class="space-y-4">
+            <div>
+                <label for="targetHost" class="block text-sm font-medium text-gray-300 mb-1">Target IP or Hostname</label>
+                <input type="text" id="targetHost" value="127.0.0.1" required 
+                       placeholder="e.g., 127.0.0.1 or localhost"
+                       class="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg text-white focus:ring-blue-500 focus:border-blue-500">
+            </div>
+            <div>
+                <label for="portRange" class="block text-sm font-medium text-gray-300 mb-1">Port Range (start-end)</label>
+                <input type="text" id="portRange" value="80-100" required 
+                       placeholder="e.g., 1-1024 or 80-81"
+                       class="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg text-white focus:ring-blue-500 focus:border-blue-500">
+            </div>
+            <button type="submit" id="scanButton" 
+                    class="w-full bg-green-600 hover:bg-green-700 text-gray-900 font-bold py-3 rounded-lg transition duration-200">
+                Execute Scan
+            </button>
+            <div id="statusMessage" class="text-center p-3 text-sm rounded-lg bg-yellow-900 text-yellow-300 hidden"></div>
+        </form>
+
+        <!-- Results Display -->
+        <div id="resultsContainer" class="mt-8 hidden">
+            <h2 class="text-xl font-bold text-blue-400 mb-4 text-center">Scan Report for <span id="displayTarget"></span></h2>
+            <p class="text-sm text-gray-400 text-center mb-4">
+                <span id="openPortCount" class="font-semibold text-green-400">0</span> Open Ports Found in <span id="scanTime">0.00</span> seconds.
+            </p>
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-700 rounded-lg overflow-hidden" id="resultsTable">
+                    <thead>
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">Port</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">Status</th>
+                            <th class="px-6 py-3 text-center text-xs font-medium uppercase tracking-wider">Security Risk & Advice</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-700" id="resultsBody">
+                        <!-- Results are inserted here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- DOM Elements ---
+        const scanForm = document.getElementById('scanForm');
+        const targetHostInput = document.getElementById('targetHost');
+        const portRangeInput = document.getElementById('portRange');
+        const scanButton = document.getElementById('scanButton');
+        const statusMessage = document.getElementById('statusMessage');
+        const resultsContainer = document.getElementById('resultsContainer');
+        const resultsBody = document.getElementById('resultsBody');
+        const displayTarget = document.getElementById('displayTarget');
+        const openPortCountElement = document.getElementById('openPortCount');
+        const scanTimeElement = document.getElementById('scanTime');
+
+        // Number of concurrent checks (similar to threads in Python)
+        const CONCURRENT_CHECKS = 50; 
+        
+        // --- Hardcoded Risk Database ---
+        const RISK_DB = {
+            21: { service: 'FTP (File Transfer Protocol)', risk: 'High', description: 'Often transmits credentials in plaintext. Highly vulnerable to brute-force attacks and sniffing.' },
+            22: { service: 'SSH (Secure Shell)', risk: 'Medium', description: 'Secure if configured with key-based authentication, but exposed SSH ports are constantly targeted by botnets for brute-force attacks.' },
+            23: { service: 'Telnet', risk: 'High', description: 'Transmits ALL data, including passwords, in plaintext. Must be disabled or replaced with SSH.' },
+            25: { service: 'SMTP (Simple Mail Transfer Protocol)', risk: 'Medium', description: 'Used for sending emails. Can be abused for spam relaying if not properly secured.' },
+            53: { service: 'DNS (Domain Name System)', risk: 'Low', description: 'Essential service, but vulnerable to DNS amplification attacks if exposed to the public internet.' },
+            80: { service: 'HTTP (Web Server)', risk: 'Medium', description: 'If web application is running, vulnerable to XSS, SQLi, and other OWASP top 10 risks. Should be migrated to HTTPS.' },
+            135: { service: 'MSRPC (Microsoft RPC)', risk: 'Medium', description: 'Used for internal Windows management. High-risk if exposed externally, as it can leak system information.' },
+            443: { service: 'HTTPS (Secure Web Server)', risk: 'Low', description: 'Standard secure web traffic. Risk is tied to the web application itself (e.g., outdated CMS, poor code).' },
+            445: { service: 'SMB (Server Message Block)', risk: 'Critical', description: 'Used for file/printer sharing. Highly vulnerable to major exploits (like EternalBlue/WannaCry). Should NEVER be exposed externally.' },
+            3306: { service: 'MySQL Database', risk: 'Critical', description: 'Direct database connection. If exposed, offers a direct path to data theft. Must be protected by a firewall.' },
+            3389: { service: 'RDP (Remote Desktop Protocol)', risk: 'High', description: 'Gives full remote GUI access. Constant target for brute-force attempts. Requires strong passwords and MFA.' },
+            8080: { service: 'HTTP Alternate', risk: 'Medium', description: 'Commonly used for development or application servers. Often has default or weak administrative credentials.' },
+        };
+
+        /** Determines security risk and advice based on port number. */
+        function getHardcodedRisk(port) {
+            const advice = RISK_DB[port];
+            if (advice) {
+                return {
+                    service: advice.service,
+                    risk: advice.risk,
+                    description: advice.description,
+                    mitigation: `Mitigation: Immediate action required! Restrict access to this port via firewall, enforce strong authentication (if applicable), and ensure the service is patched.`,
+                };
+            } else if (port > 1024) {
+                return {
+                    service: 'Unknown/Ephemeral Port',
+                    risk: 'Low',
+                    description: 'This is likely a dynamic port used by a client application. Risk depends entirely on the running application and its purpose.',
+                    mitigation: `Mitigation: Verify the application running on this port and ensure it is not unnecessarily listening to external connections.`,
+                };
+            } else {
+                 return {
+                    service: 'Unlisted Common Port',
+                    risk: 'Medium',
+                    description: 'This port is below 1024 but is not in our common risk database. Research the service running here for vulnerabilities.',
+                    mitigation: `Mitigation: Identify the specific service to assess the risk, and disable it if not necessary.`,
+                };
+            }
+        }
+
+        // --- Utility Functions (Port Scanning) ---
+
+        /** Simulates the concurrent execution found in the Python version. */
+        const throttle = (ports, callback) => {
+            return new Promise(resolve => {
+                const results = [];
+                let activeCount = 0;
+                let portIndex = 0;
+                let doneCount = 0;
+
+                const checkNext = () => {
+                    if (portIndex >= ports.length) {
+                        return;
+                    }
+
+                    const port = ports[portIndex++];
+                    activeCount++;
+                    
+                    callback(port).then(status => {
+                        results.push({ port, status });
+                        doneCount++;
+                        activeCount--;
+
+                        if (doneCount === ports.length) {
+                            resolve(results);
+                        } else {
+                            if (portIndex < ports.length) {
+                                checkNext(); 
+                            }
+                        }
+                    });
+                };
+
+                const initialChecks = Math.min(ports.length, CONCURRENT_CHECKS);
+                for (let i = 0; i < initialChecks; i++) {
+                    checkNext();
+                }
+            });
+        };
+
+        /** Attempts to check a single port using the browser's Fetch API. */
+        const checkPort = (host, port) => {
+            const url = `http://${host}:${port}`;
+            const timeout = 1000; 
+
+            return new Promise(resolve => {
+                const timer = setTimeout(() => {
+                    resolve("Closed/Filtered (Timeout)");
+                }, timeout);
+
+                fetch(url, { mode: 'no-cors' })
+                    .then(() => {
+                        clearTimeout(timer);
+                        resolve("OPEN (Connection Success)");
+                    })
+                    .catch(() => {
+                        clearTimeout(timer);
+                        resolve("Closed/Filtered (Refused)");
+                    });
+            });
+        };
+        
+        // --- Event Handler ---
+
+        scanForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const host = targetHostInput.value.trim();
+            const rangeInput = portRangeInput.value.trim();
+            
+            // --- Input Validation ---
+            let startPort, endPort;
+            try {
+                [startPort, endPort] = rangeInput.split('-').map(Number);
+                if (isNaN(startPort) || isNaN(endPort) || startPort > endPort || startPort < 1 || endPort > 65535) {
+                    throw new Error("Invalid range.");
+                }
+            } catch {
+                showMessage("error", "Invalid port range. Use format 'start-end' (e.g., 80-100).");
+                return;
+            }
+
+            // --- Setup UI for Scan ---
+            scanButton.disabled = true;
+            scanButton.textContent = 'Scanning... Please wait.';
+            resultsContainer.classList.add('hidden');
+            resultsBody.innerHTML = '';
+            
+            const portsToScan = Array.from({ length: endPort - startPort + 1 }, (_, i) => startPort + i);
+            let openPorts = 0;
+            
+            showMessage("info", `Scanning ${portsToScan.length} ports on ${host}... (Limit: ${CONCURRENT_CHECKS} checks at once)`);
+            
+            const startTime = performance.now();
+            
+            // --- Execute Port Scan ---
+            const scanResults = await throttle(portsToScan, (port) => checkPort(host, port));
+            
+            const endTime = performance.now();
+            const scanDuration = ((endTime - startTime) / 1000).toFixed(2);
+            
+            // --- Display Results & Trigger Local Risk Analysis ---
+            displayTarget.textContent = host;
+            scanTimeElement.textContent = scanDuration;
+            
+            scanResults.sort((a, b) => a.port - b.port);
+            
+            scanResults.forEach(result => {
+                const is_open = result.status.startsWith('OPEN');
+                const row = resultsBody.insertRow();
+                
+                // Port cell
+                row.insertCell().textContent = result.port;
+                row.cells[0].className = 'px-6 py-4 whitespace-nowrap text-sm font-medium';
+                
+                // Status cell
+                row.insertCell().textContent = result.status;
+                row.cells[1].className = `px-6 py-4 whitespace-nowrap text-sm font-medium ${is_open ? 'open' : 'closed'}`;
+
+                // Advice Cell (Hardcoded Risk Feature)
+                const adviceCell = row.insertCell();
+                adviceCell.className = 'px-6 py-4 text-sm text-center';
+
+                if (is_open) {
+                    openPorts++;
+                    
+                    const riskData = getHardcodedRisk(result.port);
+                    const riskClass = riskData.risk === 'Critical' ? 'risk-high' : riskData.risk === 'High' ? 'risk-high' : riskData.risk === 'Medium' ? 'risk-medium' : 'risk-low';
+
+                    adviceCell.innerHTML = `
+                        <div class="advice-status bg-blue-500 text-white">Service: ${riskData.service}</div>
+                        <div class="advice-text">
+                            <strong>Risk: <span class="${riskClass}">${riskData.risk}</span></strong><br>
+                            ${riskData.description}<br><br>
+                            ${riskData.mitigation}
+                        </div>
+                    `;
+
+                } else {
+                    adviceCell.textContent = 'N/A';
+                }
+            });
+
+            openPortCountElement.textContent = openPorts;
+            resultsContainer.classList.remove('hidden');
+            
+            showMessage("success", `Scan and local risk analysis complete in ${scanDuration} seconds.`);
+
+            scanButton.disabled = false;
+            scanButton.textContent = 'Execute Scan';
+        });
+
+        // --- Helper to show messages ---
+        function showMessage(type, message) {
+            statusMessage.textContent = message;
+            statusMessage.classList.remove('hidden', 'bg-red-900', 'bg-yellow-900', 'bg-green-900', 'text-yellow-300', 'text-red-300', 'text-green-300', 'bg-green-900');
+            
+            if (type === 'error') {
+                statusMessage.classList.add('bg-red-900', 'text-red-300');
+            } else if (type === 'info') {
+                statusMessage.classList.add('bg-yellow-900', 'text-yellow-300');
+            } else if (type === 'success') {
+                statusMessage.classList.add('bg-green-900', 'text-green-300');
+            }
+        }
+    </script>
+</body>
+</html>
